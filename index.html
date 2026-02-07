@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Visualize LLM .gguf model files as interactive 3D point clouds. See architecture differences — MoE, dense, attention heads, layer depth — at a glance instead of reading model names.">
+<title>GGUF VIS — 3D LLM Model Visualizer</title>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg-primary: #0a0a0f;
+  --bg-secondary: #12121a;
+  --bg-tertiary: #1a1a26;
+  --bg-hover: #22222e;
+  --border: #2a2a3a;
+  --text-primary: #e0e0e8;
+  --text-secondary: #8888a0;
+  --text-muted: #555566;
+  --accent: #6c8aff;
+  --accent-dim: #3a4a80;
+  --success: #44cc88;
+  --warn: #ffaa44;
+  --danger: #ff5566;
+  --sidebar-width: 320px;
+}
+
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  overflow: hidden;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* Top bar */
+#topbar {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 48px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  z-index: 100;
+  gap: 16px;
+}
+
+#topbar .logo {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 1px;
+  white-space: nowrap;
+}
+
+#topbar .model-name {
+  font-size: 14px;
+  color: var(--text-primary);
+  font-weight: 600;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#topbar .quick-stats {
+  display: flex;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+#topbar .quick-stats .stat-val {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* Sidebar */
+#sidebar {
+  position: fixed;
+  top: 48px;
+  left: 0;
+  bottom: 0;
+  width: var(--sidebar-width);
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overflow-x: hidden;
+  transition: transform 0.3s ease;
+}
+
+#sidebar::-webkit-scrollbar { width: 5px; }
+#sidebar::-webkit-scrollbar-track { background: transparent; }
+#sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+#sidebar.collapsed {
+  transform: translateX(calc(-1 * var(--sidebar-width)));
+}
+
+#sidebar-toggle {
+  position: fixed;
+  top: 56px;
+  left: 8px;
+  z-index: 95;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  transition: left 0.3s ease;
+}
+
+#sidebar.collapsed ~ #sidebar-toggle { left: 8px; }
+#sidebar:not(.collapsed) ~ #sidebar-toggle { left: calc(var(--sidebar-width) + 8px); }
+
+.sidebar-section {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-section h3 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+/* Drop zone */
+#drop-zone {
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+  padding: 28px 16px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: var(--bg-tertiary);
+}
+
+#drop-zone:hover, #drop-zone.drag-over {
+  border-color: var(--accent);
+  background: rgba(108, 138, 255, 0.06);
+}
+
+#drop-zone .drop-icon {
+  font-size: 32px;
+  margin-bottom: 8px;
+  opacity: 0.4;
+}
+
+#drop-zone .drop-text {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+#drop-zone .drop-text strong {
+  color: var(--accent);
+}
+
+#file-input { display: none; }
+
+/* Progress bar */
+#progress-container {
+  display: none;
+  padding: 0 16px 14px;
+}
+
+#progress-container.active { display: block; }
+
+#progress-bar-outer {
+  width: 100%;
+  height: 4px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+#progress-bar-inner {
+  width: 0%;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.15s ease;
+}
+
+#progress-text {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+/* Metadata panel */
+#metadata-panel {
+  display: none;
+  flex: 1;
+  overflow-y: auto;
+}
+
+#metadata-panel.active { display: flex; flex-direction: column; }
+
+#metadata-panel::-webkit-scrollbar { width: 5px; }
+#metadata-panel::-webkit-scrollbar-track { background: transparent; }
+#metadata-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+.meta-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 12px;
+}
+
+.meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.meta-item.full-width {
+  grid-column: 1 / -1;
+}
+
+.meta-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-muted);
+}
+
+.meta-value {
+  font-size: 13px;
+  color: var(--text-primary);
+  font-weight: 500;
+  word-break: break-all;
+}
+
+/* Controls */
+.control-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.control-row label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.control-row .value-display {
+  font-size: 12px;
+  color: var(--accent);
+  font-weight: 600;
+  min-width: 40px;
+  text-align: right;
+}
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  height: 4px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+select {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+}
+
+/* Legend */
+#legend {
+  display: none;
+}
+
+#legend.active { display: block; }
+
+.legend-bar {
+  height: 12px;
+  border-radius: 3px;
+  margin: 8px 0 4px;
+}
+
+.legend-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.legend-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 8px;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+/* Tensor list */
+#tensor-list-section {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+#tensor-list {
+  font-size: 11px;
+  overflow-y: auto;
+}
+
+#tensor-list::-webkit-scrollbar { width: 4px; }
+#tensor-list::-webkit-scrollbar-track { background: transparent; }
+#tensor-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.tensor-entry {
+  padding: 3px 0;
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-secondary);
+  border-bottom: 1px solid rgba(42,42,58,0.4);
+}
+
+.tensor-entry .t-name {
+  color: var(--text-primary);
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.tensor-entry .t-shape {
+  color: var(--text-muted);
+  font-size: 10px;
+  margin-left: 8px;
+  white-space: nowrap;
+}
+
+/* Canvas area */
+#canvas-container {
+  position: fixed;
+  top: 48px;
+  left: var(--sidebar-width);
+  right: 0;
+  bottom: 0;
+  background: var(--bg-primary);
+  transition: left 0.3s ease;
+}
+
+#sidebar.collapsed ~ #canvas-container {
+  left: 0;
+}
+
+#canvas-container canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* Tooltip */
+#tooltip {
+  position: fixed;
+  display: none;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-primary);
+  pointer-events: none;
+  z-index: 200;
+  max-width: 280px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+
+#tooltip .tt-name {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+#tooltip .tt-detail {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+/* Welcome overlay */
+#welcome-overlay {
+  position: fixed;
+  top: 48px;
+  left: var(--sidebar-width);
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  pointer-events: none;
+  transition: left 0.3s ease;
+}
+
+#sidebar.collapsed ~ #welcome-overlay { left: 0; }
+
+#welcome-overlay.hidden { display: none; }
+
+.welcome-content {
+  text-align: center;
+  opacity: 0.35;
+}
+
+.welcome-content .welcome-icon {
+  font-size: 64px;
+  margin-bottom: 16px;
+}
+
+.welcome-content h2 {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.welcome-content p {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* Controls HUD */
+#controls-hud {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(18, 18, 26, 0.85);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 18px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  z-index: 120;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s;
+  white-space: nowrap;
+}
+
+#controls-hud.visible { opacity: 1; }
+
+#controls-hud span {
+  display: inline-block;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 10px;
+  color: var(--text-primary);
+  font-weight: 600;
+  font-family: 'Consolas', 'Courier New', monospace;
+}
+
+/* Click-to-fly prompt */
+#fly-prompt {
+  position: fixed;
+  bottom: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(108, 138, 255, 0.15);
+  border: 1px solid var(--accent-dim);
+  border-radius: 6px;
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--accent);
+  z-index: 120;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s;
+  white-space: nowrap;
+}
+
+#fly-prompt.visible { opacity: 1; }
+
+/* Loading overlay */
+#loading-overlay {
+  position: fixed;
+  top: 48px;
+  left: var(--sidebar-width);
+  right: 0;
+  bottom: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10,10,15,0.85);
+  z-index: 60;
+  transition: left 0.3s ease;
+}
+
+#loading-overlay.active { display: flex; }
+
+.loading-content {
+  text-align: center;
+}
+
+.loading-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin: 0 auto 12px;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+#loading-text {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+</style>
+</head>
+<body>
+
+<!-- Top Bar -->
+<div id="topbar">
+  <div class="logo">GGUF VIS</div>
+  <div class="model-name" id="model-name">No model loaded</div>
+  <div class="quick-stats" id="quick-stats"></div>
+</div>
+
+<!-- Sidebar -->
+<div id="sidebar">
+  <!-- File Upload -->
+  <div class="sidebar-section">
+    <h3>Load Model</h3>
+    <div id="drop-zone">
+      <div class="drop-icon">&#11041;</div>
+      <div class="drop-text">Drop <strong>.gguf</strong> file here<br>or click to browse</div>
+    </div>
+    <input type="file" id="file-input" accept=".gguf">
+  </div>
+
+  <!-- Progress -->
+  <div id="progress-container">
+    <div id="progress-bar-outer"><div id="progress-bar-inner"></div></div>
+    <div id="progress-text">Parsing header...</div>
+  </div>
+
+  <!-- Metadata -->
+  <div id="metadata-panel">
+    <div class="sidebar-section">
+      <h3>Architecture</h3>
+      <div class="meta-grid" id="meta-arch"></div>
+    </div>
+
+    <div class="sidebar-section">
+      <h3>Controls</h3>
+      <div class="control-row">
+        <label>Points</label>
+        <input type="range" id="point-slider" min="500000" max="6000000" step="100000" value="2000000">
+        <span class="value-display" id="point-count-display">2.0M</span>
+      </div>
+      <div class="control-row">
+        <label>Point Size</label>
+        <input type="range" id="size-slider" min="0.1" max="5" step="0.1" value="0.6">
+        <span class="value-display" id="size-display">0.6</span>
+      </div>
+      <div class="control-row">
+        <label>Color</label>
+        <select id="color-mode">
+          <option value="weight">Weight Value</option>
+          <option value="tensor">Tensor Type</option>
+          <option value="layer" selected>Layer Depth</option>
+        </select>
+      </div>
+      <div class="control-row">
+        <label>Connections</label>
+        <input type="checkbox" id="connections-toggle" style="accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer;">
+        <span class="value-display" style="flex:1; text-align:left; min-width:0;">Neural links</span>
+      </div>
+      <div class="control-row" id="conn-density-row" style="display:none;">
+        <label>Density</label>
+        <input type="range" id="conn-density-slider" min="0.1" max="3.0" step="0.1" value="1.0">
+        <span class="value-display" id="conn-density-display">1.0</span>
+      </div>
+    </div>
+
+    <div class="sidebar-section" id="legend">
+      <h3>Legend</h3>
+      <div id="legend-weight" style="display:none;">
+        <div class="legend-bar" style="background: linear-gradient(to right, #3355ff, #eeeeff, #ff3355);"></div>
+        <div class="legend-labels"><span>-max</span><span>0</span><span>+max</span></div>
+      </div>
+      <div id="legend-tensor" style="display:none;">
+        <div class="legend-items">
+          <div class="legend-item"><div class="legend-swatch" style="background:#4488ff;"></div>Attention Q</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:#44aaff;"></div>Attention K</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:#44ccff;"></div>Attention V</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:#6688dd;"></div>Attention Out</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:#ff8844;"></div>FFN Gate</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:#ffaa44;"></div>FFN Up</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:#ff6644;"></div>FFN Down</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:#44dd88;"></div>Embedding</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:#dddd44;"></div>Norm</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:#aa66ff;"></div>Output</div>
+        </div>
+      </div>
+      <div id="legend-layer">
+        <div class="legend-bar" style="background: linear-gradient(to right, #22cc88, #4488ff, #aa44ff);"></div>
+        <div class="legend-labels"><span>Layer 0</span><span>Layer N</span></div>
+      </div>
+    </div>
+
+    <div class="sidebar-section" id="tensor-list-section">
+      <h3>Tensors <span id="tensor-count-label"></span></h3>
+      <div id="tensor-list"></div>
+    </div>
+  </div>
+</div>
+
+<button id="sidebar-toggle" title="Toggle sidebar">&#9776;</button>
+
+<!-- 3D Canvas -->
+<div id="canvas-container"></div>
+
+<!-- Welcome Overlay -->
+<div id="welcome-overlay">
+  <div class="welcome-content">
+    <div class="welcome-icon">&#9671;</div>
+    <h2>GGUF Model Visualizer</h2>
+    <p>Drop a .gguf file to see its architecture as a point cloud</p>
+  </div>
+</div>
+
+<!-- Loading Overlay -->
+<div id="loading-overlay">
+  <div class="loading-content">
+    <div class="loading-spinner"></div>
+    <div id="loading-text">Parsing model...</div>
+  </div>
+</div>
+
+<!-- Tooltip -->
+<div id="tooltip">
+  <div class="tt-name"></div>
+  <div class="tt-detail"></div>
+</div>
+
+<!-- Controls HUD (shows when pointer is locked) -->
+<div id="controls-hud">
+  <span>W A S D</span> move &nbsp;
+  <span>Space</span> up &nbsp;
+  <span>Ctrl</span> down &nbsp;
+  <span>Shift</span> sprint &nbsp;
+  <span>Scroll</span> speed &nbsp;
+  <span>Esc</span> release cursor
+</div>
+
+<!-- Click-to-fly prompt -->
+<div id="fly-prompt">Click canvas to enter free-roam</div>
+
+<!-- Scripts -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.163.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
+
