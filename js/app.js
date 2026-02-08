@@ -417,9 +417,9 @@ connDensitySlider.addEventListener('change', () => {
 // ─── Layer bounding boxes ────────────────────────────────────────────
 
 function rebuildLayerBoxes() {
-  if (!lastPointCloudData || !renderer || !parsedData) return;
+  if (!lastPointCloudData || !renderer) return;
   const bounds = computeLayerBounds(lastPointCloudData.tensorRegions);
-  renderer.setLayerBoxes(bounds, parsedData.archInfo.blockCount || 1);
+  renderer.setLayerBoxes(bounds);
   renderer.setLayerBoxMode(layerBoxMode.value);
 }
 

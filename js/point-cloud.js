@@ -114,15 +114,20 @@ function layerToColor(layerIdx, totalLayers) {
  * @param {Function} onProgress - Progress callback
  * @returns {{ positions: Float32Array, colors: Float32Array, tensorRegions: Array }}
  */
+// Minimum number of points any single tensor will be rendered with,
+// even if proportional allocation would give it fewer. Prevents tiny
+// tensors (norms, biases, etc.) from being invisible single dots.
+const MIN_POINTS_PER_TENSOR = 400;
+
 export async function generatePointCloud(file, archInfo, tensors, tensorDataOffset, targetPointCount, colorMode, onProgress) {
   // Compute total params and allocate points proportionally
   const totalParams = tensors.reduce((s, t) => s + t.numElements, 0);
   const decimationRatio = totalParams / targetPointCount;
 
-  // Assign point counts to each tensor proportionally
+  // Assign point counts to each tensor proportionally, with a floor
   const tensorAllocs = tensors.map(t => {
     const cls = classifyTensor(t.name);
-    const rawCount = Math.max(1, Math.floor(t.numElements / decimationRatio));
+    const rawCount = Math.max(MIN_POINTS_PER_TENSOR, Math.floor(t.numElements / decimationRatio));
     return { tensor: t, cls, pointCount: rawCount };
   });
 
@@ -132,7 +137,7 @@ export async function generatePointCloud(file, archInfo, tensors, tensorDataOffs
   if (allocTotal > 0) {
     const scale = targetPointCount / allocTotal;
     tensorAllocs.forEach(a => {
-      a.pointCount = Math.max(1, Math.round(a.pointCount * scale));
+      a.pointCount = Math.max(MIN_POINTS_PER_TENSOR, Math.round(a.pointCount * scale));
     });
   }
 
@@ -815,24 +820,30 @@ function computeLayout(archInfo, tensorAllocs) {
 // ─── Layer Bounding Boxes ───────────────────────────────────────────
 
 /**
- * Compute axis-aligned bounding boxes for each transformer layer,
- * based on the spatial regions of its tensors.
+ * Compute per-component bounding boxes so each visible cluster of dots
+ * (Q, K, V, FFN gate, embedding, output, …) gets its own tight box.
+ *
+ * Boxes are grouped by (layerIdx, category) to deduplicate regions that
+ * share the same spatial area. Each entry also carries an RGB color
+ * matching the tensor type palette.
  *
  * @param {Array} tensorRegions - Region metadata from generatePointCloud
- * @returns {Array<{layerIdx: number, min: number[], max: number[]}>}
+ * @returns {Array<{layerIdx: number, category: string, color: number[], min: number[], max: number[]}>}
  */
 export function computeLayerBounds(tensorRegions) {
-  const layerMap = new Map();
+  const groups = new Map();
 
   for (const region of tensorRegions) {
-    if (region.layerIdx < 0) continue;
-    if (!layerMap.has(region.layerIdx)) {
-      layerMap.set(region.layerIdx, {
+    const key = `${region.layerIdx}:${region.category}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        layerIdx: region.layerIdx,
+        category: region.category,
         minX: Infinity, minY: Infinity, minZ: Infinity,
         maxX: -Infinity, maxY: -Infinity, maxZ: -Infinity,
       });
     }
-    const b = layerMap.get(region.layerIdx);
+    const b = groups.get(key);
     const r = region.region;
     b.minX = Math.min(b.minX, r.x);
     b.minY = Math.min(b.minY, r.y);
@@ -843,10 +854,13 @@ export function computeLayerBounds(tensorRegions) {
   }
 
   const bounds = [];
-  for (const [layerIdx, b] of layerMap) {
-    const pad = 0.5;
+  for (const [, b] of groups) {
+    const pad = 0.3;
+    const color = TENSOR_COLORS[b.category] || TENSOR_COLORS.other;
     bounds.push({
-      layerIdx,
+      layerIdx: b.layerIdx,
+      category: b.category,
+      color,
       min: [b.minX - pad, b.minY - pad, b.minZ - pad],
       max: [b.maxX + pad, b.maxY + pad, b.maxZ + pad],
     });

@@ -330,11 +330,13 @@ export class ModelRenderer {
   // ─── Layer Bounding Boxes ──────────────────────────────────────────
 
   /**
-   * Create semi-transparent bounding boxes for each transformer layer.
-   * @param {Array<{layerIdx: number, min: number[], max: number[]}>} layerBounds
-   * @param {number} totalLayers - Total number of layers (for color mapping)
+   * Create per-component semi-transparent bounding boxes.
+   * Each tensor component (Q, K, V, FFN gate, embedding, …) gets its own
+   * tightly fitting box colored by tensor type.
+   *
+   * @param {Array<{layerIdx: number, category: string, color: number[], min: number[], max: number[]}>} layerBounds
    */
-  setLayerBoxes(layerBounds, totalLayers) {
+  setLayerBoxes(layerBounds) {
     this._clearLayerBoxes();
 
     for (const bound of layerBounds) {
@@ -342,20 +344,10 @@ export class ModelRenderer {
       const sizeY = bound.max[1] - bound.min[1];
       const sizeZ = bound.max[2] - bound.min[2];
 
-      // Color based on layer depth (green → blue → purple)
-      const t = totalLayers > 1 ? bound.layerIdx / (totalLayers - 1) : 0;
-      let cr, cg, cb;
-      if (t < 0.5) {
-        const s = t * 2;
-        cr = 0.13 * (1 - s) + 0.27 * s;
-        cg = 0.8 * (1 - s) + 0.53 * s;
-        cb = 0.53 * (1 - s) + 1.0 * s;
-      } else {
-        const s = (t - 0.5) * 2;
-        cr = 0.27 * (1 - s) + 0.67 * s;
-        cg = 0.53 * (1 - s) + 0.27 * s;
-        cb = 1.0;
-      }
+      // Skip degenerate boxes
+      if (sizeX < 0.01 || sizeY < 0.01 || sizeZ < 0.01) continue;
+
+      const [cr, cg, cb] = bound.color;
       const boxColor = new THREE.Color(cr, cg, cb);
 
       const geometry = new THREE.BoxGeometry(sizeX, sizeY, sizeZ);
@@ -364,7 +356,7 @@ export class ModelRenderer {
       const fillMaterial = new THREE.MeshBasicMaterial({
         color: boxColor,
         transparent: true,
-        opacity: 0.035,
+        opacity: 0.04,
         side: THREE.DoubleSide,
         depthWrite: false,
       });
@@ -375,7 +367,7 @@ export class ModelRenderer {
       const edgeMaterial = new THREE.LineBasicMaterial({
         color: boxColor,
         transparent: true,
-        opacity: 0.2,
+        opacity: 0.25,
       });
       const edgeMesh = new THREE.LineSegments(edgesGeometry, edgeMaterial);
 
@@ -388,7 +380,7 @@ export class ModelRenderer {
         bound.min[2] + sizeZ / 2,
       );
       group.visible = false;
-      group.userData = { layerIdx: bound.layerIdx };
+      group.userData = { layerIdx: bound.layerIdx, category: bound.category };
 
       this.scene.add(group);
       this.layerBoxes.push(group);
