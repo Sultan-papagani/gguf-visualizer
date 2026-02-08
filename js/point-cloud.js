@@ -23,9 +23,9 @@ const TENSOR_COLORS = {
   ffn_norm:   [0.87, 0.87, 0.27],  // #dddd44
   ffn_other:  [1.00, 0.60, 0.33],  // #ff9955
 
-  moe_gate:   [1.00, 0.40, 0.67],  // #ff66aa
-  moe_up:     [1.00, 0.53, 0.73],  // #ff88bb
-  moe_down:   [1.00, 0.27, 0.53],  // #ff4488
+  moe_gate:   [0.00, 0.90, 0.85],  // #00e5d9 — teal (router)
+  moe_up:     [0.85, 0.25, 0.95],  // #d940f2 — magenta
+  moe_down:   [0.95, 0.75, 0.10],  // #f2bf1a — golden
 
   embedding:  [0.27, 0.87, 0.53],  // #44dd88
   output:     [0.67, 0.40, 1.00],  // #aa66ff
@@ -33,6 +33,42 @@ const TENSOR_COLORS = {
   norm:       [0.87, 0.87, 0.27],  // #dddd44
   other:      [0.53, 0.53, 0.60],  // #888899
 };
+
+// ─── Human-readable tensor names ─────────────────────────────────────
+
+const KNOWN_NAMES = {
+  embedding:   'Token Embedding',
+  output:      'Output Projection (LM Head)',
+  output_norm: 'Final Layer Norm',
+  attn_q:      'Attention Query',
+  attn_k:      'Attention Key',
+  attn_v:      'Attention Value',
+  attn_out:    'Attention Output',
+  attn_norm:   'Pre-Attention Norm',
+  attn_other:  'Attention (misc)',
+  ffn_gate:    'FFN Gate Projection',
+  ffn_up:      'FFN Up Projection',
+  ffn_down:    'FFN Down Projection',
+  ffn_norm:    'Pre-FFN Norm',
+  ffn_other:   'FFN (misc)',
+  moe_gate:    'MoE Router / Gate',
+  moe_up:      'MoE Expert Up',
+  moe_down:    'MoE Expert Down',
+  norm:        'Layer Norm',
+  other:       'Tensor',
+};
+
+/**
+ * Return a human-readable "known name" for a tensor based on its role.
+ */
+export function getKnownName(category, layerIdx, expertIdx) {
+  let base = KNOWN_NAMES[category] || category;
+  const parts = [];
+  if (layerIdx >= 0) parts.push(`Layer ${layerIdx}`);
+  if (expertIdx >= 0) parts.push(`Expert ${expertIdx}`);
+  if (parts.length > 0) return `${base} — ${parts.join(', ')}`;
+  return base;
+}
 
 /**
  * Diverging colormap: blue -> white -> red
@@ -218,8 +254,10 @@ export async function generatePointCloud(file, archInfo, tensors, tensorDataOffs
 
     tensorRegions.push({
       name: tensor.name,
+      knownName: getKnownName(cls.category, cls.layerIdx, cls.expertIdx),
       category: cls.category,
       layerIdx: cls.layerIdx,
+      expertIdx: cls.expertIdx,
       dims: tensor.dims,
       type: tensor.type,
       region: region,
@@ -244,19 +282,25 @@ export async function generatePointCloud(file, archInfo, tensors, tensorDataOffs
  * @returns {{ positions: Float32Array, colors: Float32Array, lineCount: number }}
  */
 export function generateConnections(tensorRegions, positions, density = 1.0) {
-  // Connection rules: [sourceCategories, targetCategories]
+  // ── Full transformer data-flow rules ──
+  // matchExpert: only connect regions sharing the same expertIdx
   const INTRA_LAYER_RULES = [
-    // Attention: Q, K, V feed into Out
-    { from: ['attn_q'],   to: ['attn_out'] },
-    { from: ['attn_k'],   to: ['attn_out'] },
-    { from: ['attn_v'],   to: ['attn_out'] },
-    // Attention output feeds into FFN
-    { from: ['attn_out'],  to: ['ffn_gate', 'ffn_up'] },
-    // FFN internal flow
-    { from: ['ffn_gate'],  to: ['ffn_down'] },
-    { from: ['ffn_up'],    to: ['ffn_down'] },
-    // MoE routing
-    { from: ['moe_gate'],  to: ['moe_up'] },
+    // Pre-attention norm → Q, K, V
+    { from: ['attn_norm'], to: ['attn_q', 'attn_k', 'attn_v'] },
+    // Q, K, V → Attention Output
+    { from: ['attn_q'],    to: ['attn_out'] },
+    { from: ['attn_k'],    to: ['attn_out'] },
+    { from: ['attn_v'],    to: ['attn_out'] },
+    // Attention Output → Pre-FFN Norm
+    { from: ['attn_out'],  to: ['ffn_norm'] },
+    // Pre-FFN Norm → gate/up (dense) or MoE router
+    { from: ['ffn_norm'],  to: ['ffn_gate', 'ffn_up', 'moe_gate'] },
+    // MoE: router → individual expert gates/ups and packed experts
+    { from: ['moe_gate'],  to: ['ffn_gate', 'ffn_up', 'moe_up'] },
+    // FFN gate/up → down (expert-aware for MoE individual experts)
+    { from: ['ffn_gate'],  to: ['ffn_down'], matchExpert: true },
+    { from: ['ffn_up'],    to: ['ffn_down'], matchExpert: true },
+    // Packed MoE: up → down
     { from: ['moe_up'],    to: ['moe_down'] },
   ];
 
@@ -284,58 +328,88 @@ export function generateConnections(tensorRegions, positions, density = 1.0) {
     for (const rule of INTRA_LAYER_RULES) {
       const sources = regions.filter(r => rule.from.includes(r.category));
       const targets = regions.filter(r => rule.to.includes(r.category));
+
       for (const src of sources) {
-        for (const tgt of targets) {
+        // Expert-aware: only connect same expert (or both non-expert)
+        let validTargets = targets;
+        if (rule.matchExpert) {
+          validTargets = targets.filter(tgt =>
+            src.expertIdx === tgt.expertIdx ||
+            (src.expertIdx < 0 && tgt.expertIdx < 0)
+          );
+        }
+
+        for (const tgt of validTargets) {
           _sampleLines(src, tgt, positions, linePositions, lineColors, density);
         }
       }
     }
   }
 
-  // ── Cross-layer connections: FFN down → next layer's attention ──
+  // ── Cross-layer: FFN down → next layer's attn_norm (or Q,K,V) ──
   for (let i = 0; i < layers.length - 1; i++) {
     const currentRegions = layerMap.get(layers[i]);
     const nextRegions = layerMap.get(layers[i + 1]);
 
-    const downs = currentRegions.filter(r => r.category === 'ffn_down' || r.category === 'moe_down');
-    const nextAttns = nextRegions.filter(r => ['attn_q', 'attn_k', 'attn_v'].includes(r.category));
+    const downs = currentRegions.filter(r =>
+      r.category === 'ffn_down' || r.category === 'moe_down'
+    );
+    const nextNorms = nextRegions.filter(r => r.category === 'attn_norm');
+    const nextTargets = nextNorms.length > 0
+      ? nextNorms
+      : nextRegions.filter(r => ['attn_q', 'attn_k', 'attn_v'].includes(r.category));
 
     for (const src of downs) {
-      // Connect to one random target attention type (not all, to keep lines tidy)
-      if (nextAttns.length > 0) {
-        const tgt = nextAttns[Math.floor(Math.random() * nextAttns.length)];
-        _sampleLines(src, tgt, positions, linePositions, lineColors, density * 0.3, 0.35);
+      for (const tgt of nextTargets) {
+        _sampleLines(src, tgt, positions, linePositions, lineColors, density * 0.4, 0.35);
       }
     }
   }
 
-  // ── Embedding → first layer ──
+  // ── Embedding → first layer's attn_norm (or Q,K,V) ──
   if (layers.length > 0) {
     const embeddings = globals.filter(r => r.category === 'embedding');
-    const firstAttns = (layerMap.get(layers[0]) || []).filter(r =>
-      ['attn_q', 'attn_k', 'attn_v'].includes(r.category)
-    );
+    const firstRegions = layerMap.get(layers[0]) || [];
+    const firstNorms = firstRegions.filter(r => r.category === 'attn_norm');
+    const firstTargets = firstNorms.length > 0
+      ? firstNorms
+      : firstRegions.filter(r => ['attn_q', 'attn_k', 'attn_v'].includes(r.category));
+
     for (const src of embeddings) {
-      for (const tgt of firstAttns) {
+      for (const tgt of firstTargets) {
         _sampleLines(src, tgt, positions, linePositions, lineColors, density * 0.5, 0.4);
       }
     }
   }
 
-  // ── Last layer → output ──
+  // ── Last layer → output_norm → output ──
   if (layers.length > 0) {
     const lastRegions = layerMap.get(layers[layers.length - 1]) || [];
-    const lastDowns = lastRegions.filter(r => r.category === 'ffn_down' || r.category === 'moe_down');
+    const lastDowns = lastRegions.filter(r =>
+      r.category === 'ffn_down' || r.category === 'moe_down'
+    );
+    const outputNorms = globals.filter(r => r.category === 'output_norm');
     const outputs = globals.filter(r => r.category === 'output');
 
+    // down → output_norm (or directly to output)
+    const endTargets = outputNorms.length > 0 ? outputNorms : outputs;
     for (const src of lastDowns) {
-      for (const tgt of outputs) {
+      for (const tgt of endTargets) {
         _sampleLines(src, tgt, positions, linePositions, lineColors, density * 0.5, 0.4);
+      }
+    }
+
+    // output_norm → output
+    if (outputNorms.length > 0) {
+      for (const src of outputNorms) {
+        for (const tgt of outputs) {
+          _sampleLines(src, tgt, positions, linePositions, lineColors, density * 0.5, 0.4);
+        }
       }
     }
   }
 
-  const totalLines = linePositions.length / 6; // 6 floats per line (2 vertices × 3)
+  const totalLines = linePositions.length / 6;
 
   return {
     positions: new Float32Array(linePositions),
@@ -389,7 +463,47 @@ function _sampleLines(srcRegion, tgtRegion, positions, outPos, outCol, density =
   }
 }
 
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║  LAYOUT SETTINGS — Edit these values to adjust spacing             ║
+// ╚══════════════════════════════════════════════════════════════════════╝
+//
+// LAYER_SPACING: Z distance between the start of consecutive layers.
+//                Increase this to push layers further apart.
+//
+// STAGE_*: Z offset within each layer for each transformer sub-block.
+//          Data flows along Z in this order:
+//          ATTN_NORM → QKV → ATTN_OUT → FFN_NORM → FFN_GATE_UP → FFN_DOWN
+//
+// All values are in world-space units. The camera auto-fits to the model.
+
+const LAYER_SPACING     = 18.0;   // ← Main knob: distance between layers
+
+const STAGE_ATTN_NORM   =  0.0;   // Pre-attention norm
+const STAGE_QKV         =  2.5;   // Query / Key / Value projections
+const STAGE_ATTN_OUT    =  7.0;   // Attention output projection
+const STAGE_FFN_NORM    = 10.0;   // Pre-FFN norm
+const STAGE_FFN_GATE_UP = 12.5;   // FFN gate + up projections
+const STAGE_FFN_DOWN    = 16.0;   // FFN down projection
+
 // ─── Layout Engine ──────────────────────────────────────────────────
+//
+// The layout follows the transformer data-flow order along the Z axis:
+//
+//   [Embedding]
+//       ↓
+//   ┌─ Layer 0 ──────────────────────┐
+//   │  [Attn Norm]  (thin bar)       │
+//   │  [Q] [K] [V]  (side by side)   │
+//   │  [Attn Out]   (centered)       │
+//   │  [FFN Norm]   (thin bar)       │
+//   │  [Gate] [Up]  (side by side)   │
+//   │  [Down]       (centered)       │
+//   └────────────────────────────────┘
+//       ↓
+//   ┌─ Layer 1 ─ ... ─┐
+//       ↓
+//   [Output Norm]
+//   [Output]
 
 function computeLayout(archInfo, tensorAllocs) {
   const {
@@ -408,267 +522,337 @@ function computeLayout(archInfo, tensorAllocs) {
   const ffnMult = feedForwardLength ? feedForwardLength / Math.max(embeddingLength, 1) : 4;
   const experts = isMoE ? (expertCount || 1) : 1;
 
-  // Spacing constants (these define the overall shape)
-  const LAYER_SPACING = 3.0;
+  // ── Per-block constants ──
   const HEAD_WIDTH = 1.0;
   const COMPONENT_GAP = 0.6;
   const EXPERT_GAP = 0.3;
   const TENSOR_HEIGHT_BASE = 2.0;
-  const TENSOR_DEPTH = 1.5;
+  const BLOCK_DEPTH = 1.2;        // Z thickness of each sub-block
 
-  // Attention section width: Q(heads) + K(headsKV) + V(headsKV) + Out(1) + gaps
+  // ── Width calculations ──
   const attnQWidth = heads * HEAD_WIDTH;
   const attnKWidth = headsKV * HEAD_WIDTH;
   const attnVWidth = headsKV * HEAD_WIDTH;
   const attnOutWidth = heads * HEAD_WIDTH * 0.5;
-  const attnTotalWidth = attnQWidth + attnKWidth + attnVWidth + attnOutWidth + COMPONENT_GAP * 3;
+  const qkvTotalWidth = attnQWidth + attnKWidth + attnVWidth + COMPONENT_GAP * 2;
 
-  // FFN section width
   const ffnBlockWidth = Math.max(2, ffnMult) * HEAD_WIDTH;
   const ffnTotalWidth = isMoE
     ? experts * (ffnBlockWidth + EXPERT_GAP) * 0.4
     : ffnBlockWidth * 1.5;
 
-  const totalLayerWidth = attnTotalWidth + COMPONENT_GAP * 2 + ffnTotalWidth;
-
-  // Center everything
   const centerX = 0;
-  const baseX = centerX - totalLayerWidth / 2;
-
-  // Embedding / output heights
   const embHeight = TENSOR_HEIGHT_BASE * 1.5;
   const layerHeight = TENSOR_HEIGHT_BASE;
 
+  // Max width for embedding/output blocks
+  const globalBlockWidth = Math.max(qkvTotalWidth, ffnTotalWidth) * 0.8;
+
   return {
     getRegion(category, layerIdx, expertIdx, tensor) {
-      // Special tensors (not in blocks)
+      // ── Global: Token Embedding ──
       if (category === 'embedding') {
         return {
-          x: centerX - attnTotalWidth * 0.4,
+          x: centerX - globalBlockWidth / 2,
           y: 0,
-          z: -LAYER_SPACING * 2,
-          width: attnTotalWidth * 0.8,
+          z: -LAYER_SPACING * 1.5,
+          width: globalBlockWidth,
           height: embHeight,
-          depth: TENSOR_DEPTH * 2,
+          depth: BLOCK_DEPTH * 2,
         };
       }
 
-      if (category === 'output' || category === 'output_norm') {
-        const zOff = category === 'output_norm' ? 0.5 : 0;
+      // ── Global: Output Norm + Output ──
+      if (category === 'output_norm') {
         return {
-          x: centerX - attnTotalWidth * 0.4,
+          x: centerX - globalBlockWidth / 2,
           y: 0,
-          z: layers * LAYER_SPACING + LAYER_SPACING + zOff,
-          width: attnTotalWidth * 0.8,
+          z: layers * LAYER_SPACING + 0.5,
+          width: globalBlockWidth,
+          height: 0.3,
+          depth: BLOCK_DEPTH,
+        };
+      }
+      if (category === 'output') {
+        return {
+          x: centerX - globalBlockWidth / 2,
+          y: 0,
+          z: layers * LAYER_SPACING + 2.0,
+          width: globalBlockWidth,
           height: embHeight,
-          depth: TENSOR_DEPTH,
+          depth: BLOCK_DEPTH,
         };
       }
 
-      // Norm layers not in blocks
+      // ── Global: Misc norms / other ──
       if (layerIdx < 0 && (category === 'norm' || category === 'other')) {
         return {
           x: centerX - 2,
           y: 0,
-          z: layers * LAYER_SPACING + LAYER_SPACING * 2,
+          z: layers * LAYER_SPACING + LAYER_SPACING,
           width: 4,
           height: 0.3,
-          depth: TENSOR_DEPTH,
+          depth: BLOCK_DEPTH,
         };
       }
 
-      // Block-level tensors
+      // ── Block-level tensors (per layer) ──
       const layerZ = Math.max(0, layerIdx) * LAYER_SPACING;
-      let x = baseX;
 
-      // Attention Q
-      if (category === 'attn_q') {
-        return {
-          x: x,
-          y: 0,
-          z: layerZ,
-          width: attnQWidth,
-          height: layerHeight,
-          depth: TENSOR_DEPTH,
-        };
-      }
-
-      x += attnQWidth + COMPONENT_GAP;
-
-      // Attention K
-      if (category === 'attn_k') {
-        return {
-          x: x,
-          y: 0,
-          z: layerZ,
-          width: attnKWidth,
-          height: layerHeight * 0.7, // Visually shorter for GQA
-          depth: TENSOR_DEPTH,
-        };
-      }
-
-      x += attnKWidth + COMPONENT_GAP;
-
-      // Attention V
-      if (category === 'attn_v') {
-        return {
-          x: x,
-          y: 0,
-          z: layerZ,
-          width: attnVWidth,
-          height: layerHeight * 0.7,
-          depth: TENSOR_DEPTH,
-        };
-      }
-
-      x += attnVWidth + COMPONENT_GAP;
-
-      // Attention Output
-      if (category === 'attn_out' || category === 'attn_other') {
-        return {
-          x: x,
-          y: 0,
-          z: layerZ,
-          width: attnOutWidth,
-          height: layerHeight,
-          depth: TENSOR_DEPTH,
-        };
-      }
-
-      // Attention norm (thin slice)
+      // ── Stage 0: Pre-Attention Norm (thin bar) ──
       if (category === 'attn_norm') {
         return {
-          x: baseX,
+          x: centerX - qkvTotalWidth / 2,
           y: layerHeight + 0.2,
-          z: layerZ,
-          width: attnTotalWidth,
+          z: layerZ + STAGE_ATTN_NORM,
+          width: qkvTotalWidth,
           height: 0.15,
-          depth: TENSOR_DEPTH,
+          depth: BLOCK_DEPTH * 0.5,
         };
       }
 
-      x += attnOutWidth + COMPONENT_GAP * 2;
-      const ffnBaseX = x;
+      // ── Stage 1: Q, K, V (side by side, centered) ──
+      const qkvBaseX = centerX - qkvTotalWidth / 2;
 
-      // FFN norm (thin slice)
+      if (category === 'attn_q') {
+        return {
+          x: qkvBaseX,
+          y: 0,
+          z: layerZ + STAGE_QKV,
+          width: attnQWidth,
+          height: layerHeight,
+          depth: BLOCK_DEPTH,
+        };
+      }
+
+      if (category === 'attn_k') {
+        return {
+          x: qkvBaseX + attnQWidth + COMPONENT_GAP,
+          y: 0,
+          z: layerZ + STAGE_QKV,
+          width: attnKWidth,
+          height: layerHeight * 0.7,  // shorter for GQA
+          depth: BLOCK_DEPTH,
+        };
+      }
+
+      if (category === 'attn_v') {
+        return {
+          x: qkvBaseX + attnQWidth + attnKWidth + COMPONENT_GAP * 2,
+          y: 0,
+          z: layerZ + STAGE_QKV,
+          width: attnVWidth,
+          height: layerHeight * 0.7,  // shorter for GQA
+          depth: BLOCK_DEPTH,
+        };
+      }
+
+      // ── Stage 2: Attention Output (centered) ──
+      if (category === 'attn_out' || category === 'attn_other') {
+        return {
+          x: centerX - attnOutWidth / 2,
+          y: 0,
+          z: layerZ + STAGE_ATTN_OUT,
+          width: attnOutWidth,
+          height: layerHeight,
+          depth: BLOCK_DEPTH,
+        };
+      }
+
+      // ── Stage 3: Pre-FFN Norm (thin bar) ──
       if (category === 'ffn_norm') {
         return {
-          x: ffnBaseX,
+          x: centerX - ffnTotalWidth / 2,
           y: layerHeight + 0.2,
-          z: layerZ,
+          z: layerZ + STAGE_FFN_NORM,
           width: ffnTotalWidth,
           height: 0.15,
-          depth: TENSOR_DEPTH,
+          depth: BLOCK_DEPTH * 0.5,
         };
       }
 
-      // FFN layers
-      if (isMoE && experts > 1) {
-        // MoE layout: each expert gets its own column
-        const eIdx = Math.max(0, expertIdx);
-        const expertWidth = ffnTotalWidth / experts - EXPERT_GAP;
-        const expertX = ffnBaseX + eIdx * (expertWidth + EXPERT_GAP);
+      // ── Stage 4 & 5: FFN / MoE ──
 
-        // MoE gate (router) spans all experts
+      // MoE layout
+      if (isMoE && experts > 1) {
+        // MoE router — thin bar spanning all experts
         if (category === 'moe_gate') {
           return {
-            x: ffnBaseX,
+            x: centerX - ffnTotalWidth / 2,
             y: layerHeight + 0.5,
-            z: layerZ,
+            z: layerZ + STAGE_FFN_GATE_UP - 1.0,
             width: ffnTotalWidth,
             height: 0.3,
-            depth: TENSOR_DEPTH,
+            depth: BLOCK_DEPTH * 0.5,
           };
         }
 
-        const subWidth = expertWidth / 3;
-        if (category === 'ffn_gate' || category === 'moe_gate') {
+        // Packed expert tensors — span all experts
+        if (category === 'moe_up') {
+          return {
+            x: centerX - ffnTotalWidth / 2,
+            y: 0,
+            z: layerZ + STAGE_FFN_GATE_UP,
+            width: ffnTotalWidth,
+            height: layerHeight,
+            depth: BLOCK_DEPTH,
+          };
+        }
+        if (category === 'moe_down') {
+          return {
+            x: centerX - ffnTotalWidth / 2,
+            y: 0,
+            z: layerZ + STAGE_FFN_DOWN,
+            width: ffnTotalWidth,
+            height: layerHeight,
+            depth: BLOCK_DEPTH,
+          };
+        }
+
+        // Individual expert tensors — positioned at expert column
+        const eIdx = Math.max(0, expertIdx);
+        const expertWidth = ffnTotalWidth / experts - EXPERT_GAP;
+        const moeBaseX = centerX - ffnTotalWidth / 2;
+        const expertX = moeBaseX + eIdx * (expertWidth + EXPERT_GAP);
+
+        const subWidth = expertWidth / 2;
+        if (category === 'ffn_gate') {
           return {
             x: expertX,
             y: 0,
-            z: layerZ,
+            z: layerZ + STAGE_FFN_GATE_UP,
             width: subWidth,
             height: layerHeight,
-            depth: TENSOR_DEPTH,
+            depth: BLOCK_DEPTH,
           };
         }
-        if (category === 'ffn_up' || category === 'moe_up') {
+        if (category === 'ffn_up') {
           return {
             x: expertX + subWidth,
             y: 0,
-            z: layerZ,
+            z: layerZ + STAGE_FFN_GATE_UP,
             width: subWidth,
             height: layerHeight,
-            depth: TENSOR_DEPTH,
+            depth: BLOCK_DEPTH,
           };
         }
-        if (category === 'ffn_down' || category === 'moe_down') {
+        if (category === 'ffn_down') {
           return {
-            x: expertX + subWidth * 2,
+            x: expertX,
             y: 0,
-            z: layerZ,
-            width: subWidth,
+            z: layerZ + STAGE_FFN_DOWN,
+            width: expertWidth,
             height: layerHeight,
-            depth: TENSOR_DEPTH,
+            depth: BLOCK_DEPTH,
           };
         }
       }
 
-      // Dense FFN layout
+      // Dense FFN layout (centered)
       const ffnSubWidth = ffnTotalWidth / 3 - COMPONENT_GAP * 0.3;
+      const ffnH = layerHeight * Math.min(ffnMult / 4, 1.5);
 
+      // Gate + Up side by side at FFN_GATE_UP stage (centered)
       if (category === 'ffn_gate') {
+        const pairWidth = ffnSubWidth * 2 + COMPONENT_GAP * 0.3;
         return {
-          x: ffnBaseX,
+          x: centerX - pairWidth / 2,
           y: 0,
-          z: layerZ,
+          z: layerZ + STAGE_FFN_GATE_UP,
           width: ffnSubWidth,
-          height: layerHeight * Math.min(ffnMult / 4, 1.5),
-          depth: TENSOR_DEPTH,
+          height: ffnH,
+          depth: BLOCK_DEPTH,
         };
       }
       if (category === 'ffn_up') {
+        const pairWidth = ffnSubWidth * 2 + COMPONENT_GAP * 0.3;
         return {
-          x: ffnBaseX + ffnSubWidth + COMPONENT_GAP * 0.3,
+          x: centerX - pairWidth / 2 + ffnSubWidth + COMPONENT_GAP * 0.3,
           y: 0,
-          z: layerZ,
+          z: layerZ + STAGE_FFN_GATE_UP,
           width: ffnSubWidth,
-          height: layerHeight * Math.min(ffnMult / 4, 1.5),
-          depth: TENSOR_DEPTH,
+          height: ffnH,
+          depth: BLOCK_DEPTH,
         };
       }
+
+      // Down centered at FFN_DOWN stage
       if (category === 'ffn_down') {
         return {
-          x: ffnBaseX + (ffnSubWidth + COMPONENT_GAP * 0.3) * 2,
+          x: centerX - ffnSubWidth / 2,
           y: 0,
-          z: layerZ,
+          z: layerZ + STAGE_FFN_DOWN,
           width: ffnSubWidth,
-          height: layerHeight * Math.min(ffnMult / 4, 1.5),
-          depth: TENSOR_DEPTH,
+          height: ffnH,
+          depth: BLOCK_DEPTH,
         };
       }
 
       if (category === 'ffn_other') {
         return {
-          x: ffnBaseX,
+          x: centerX - ffnTotalWidth / 2,
           y: 0,
-          z: layerZ,
+          z: layerZ + STAGE_FFN_GATE_UP,
           width: ffnTotalWidth,
           height: layerHeight,
-          depth: TENSOR_DEPTH,
+          depth: BLOCK_DEPTH,
         };
       }
 
-      // Fallback: place unrecognized tensors at the edge
+      // Fallback: unrecognized tensors
       return {
         x: centerX - 3,
         y: -3,
-        z: layerIdx >= 0 ? layerIdx * LAYER_SPACING : layers * LAYER_SPACING + 3,
+        z: layerIdx >= 0 ? layerZ + STAGE_QKV : layers * LAYER_SPACING + 3,
         width: 6,
         height: 1,
-        depth: TENSOR_DEPTH,
+        depth: BLOCK_DEPTH,
       };
     }
   };
+}
+
+// ─── Layer Bounding Boxes ───────────────────────────────────────────
+
+/**
+ * Compute axis-aligned bounding boxes for each transformer layer,
+ * based on the spatial regions of its tensors.
+ *
+ * @param {Array} tensorRegions - Region metadata from generatePointCloud
+ * @returns {Array<{layerIdx: number, min: number[], max: number[]}>}
+ */
+export function computeLayerBounds(tensorRegions) {
+  const layerMap = new Map();
+
+  for (const region of tensorRegions) {
+    if (region.layerIdx < 0) continue;
+    if (!layerMap.has(region.layerIdx)) {
+      layerMap.set(region.layerIdx, {
+        minX: Infinity, minY: Infinity, minZ: Infinity,
+        maxX: -Infinity, maxY: -Infinity, maxZ: -Infinity,
+      });
+    }
+    const b = layerMap.get(region.layerIdx);
+    const r = region.region;
+    b.minX = Math.min(b.minX, r.x);
+    b.minY = Math.min(b.minY, r.y);
+    b.minZ = Math.min(b.minZ, r.z);
+    b.maxX = Math.max(b.maxX, r.x + r.width);
+    b.maxY = Math.max(b.maxY, r.y + r.height);
+    b.maxZ = Math.max(b.maxZ, r.z + r.depth);
+  }
+
+  const bounds = [];
+  for (const [layerIdx, b] of layerMap) {
+    const pad = 0.5;
+    bounds.push({
+      layerIdx,
+      min: [b.minX - pad, b.minY - pad, b.minZ - pad],
+      max: [b.maxX + pad, b.maxY + pad, b.maxZ + pad],
+    });
+  }
+
+  bounds.sort((a, b) => a.layerIdx - b.layerIdx);
+  return bounds;
 }
 

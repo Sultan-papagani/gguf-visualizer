@@ -173,6 +173,9 @@ export class ModelRenderer {
     this.tensorRegions = [];
     this.pointCloud = null;
     this.connectionLines = null;
+    this.layerBoxes = [];        // Array of THREE.Group (fill + edges per layer)
+    this.layerBoxMode = 'disabled';  // 'disabled' | 'hover' | 'always'
+    this._highlightedLayer = -1;
     this.clock = new THREE.Clock();
 
     this._initScene();
@@ -324,6 +327,123 @@ export class ModelRenderer {
     }
   }
 
+  // ─── Layer Bounding Boxes ──────────────────────────────────────────
+
+  /**
+   * Create semi-transparent bounding boxes for each transformer layer.
+   * @param {Array<{layerIdx: number, min: number[], max: number[]}>} layerBounds
+   * @param {number} totalLayers - Total number of layers (for color mapping)
+   */
+  setLayerBoxes(layerBounds, totalLayers) {
+    this._clearLayerBoxes();
+
+    for (const bound of layerBounds) {
+      const sizeX = bound.max[0] - bound.min[0];
+      const sizeY = bound.max[1] - bound.min[1];
+      const sizeZ = bound.max[2] - bound.min[2];
+
+      // Color based on layer depth (green → blue → purple)
+      const t = totalLayers > 1 ? bound.layerIdx / (totalLayers - 1) : 0;
+      let cr, cg, cb;
+      if (t < 0.5) {
+        const s = t * 2;
+        cr = 0.13 * (1 - s) + 0.27 * s;
+        cg = 0.8 * (1 - s) + 0.53 * s;
+        cb = 0.53 * (1 - s) + 1.0 * s;
+      } else {
+        const s = (t - 0.5) * 2;
+        cr = 0.27 * (1 - s) + 0.67 * s;
+        cg = 0.53 * (1 - s) + 0.27 * s;
+        cb = 1.0;
+      }
+      const boxColor = new THREE.Color(cr, cg, cb);
+
+      const geometry = new THREE.BoxGeometry(sizeX, sizeY, sizeZ);
+
+      // Semi-transparent fill
+      const fillMaterial = new THREE.MeshBasicMaterial({
+        color: boxColor,
+        transparent: true,
+        opacity: 0.035,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      const fillMesh = new THREE.Mesh(geometry, fillMaterial);
+
+      // Edge wireframe
+      const edgesGeometry = new THREE.EdgesGeometry(geometry);
+      const edgeMaterial = new THREE.LineBasicMaterial({
+        color: boxColor,
+        transparent: true,
+        opacity: 0.2,
+      });
+      const edgeMesh = new THREE.LineSegments(edgesGeometry, edgeMaterial);
+
+      const group = new THREE.Group();
+      group.add(fillMesh);
+      group.add(edgeMesh);
+      group.position.set(
+        bound.min[0] + sizeX / 2,
+        bound.min[1] + sizeY / 2,
+        bound.min[2] + sizeZ / 2,
+      );
+      group.visible = false;
+      group.userData = { layerIdx: bound.layerIdx };
+
+      this.scene.add(group);
+      this.layerBoxes.push(group);
+    }
+
+    this._applyLayerBoxMode();
+  }
+
+  /**
+   * Set the display mode for layer boxes.
+   * @param {'disabled'|'hover'|'always'} mode
+   */
+  setLayerBoxMode(mode) {
+    this.layerBoxMode = mode;
+    this._applyLayerBoxMode();
+  }
+
+  /**
+   * Highlight a specific layer's bounding box (for hover mode).
+   * Pass -1 to unhighlight all.
+   */
+  highlightLayer(layerIdx) {
+    if (this._highlightedLayer === layerIdx) return;
+    this._highlightedLayer = layerIdx;
+
+    if (this.layerBoxMode !== 'hover') return;
+
+    for (const box of this.layerBoxes) {
+      box.visible = box.userData.layerIdx === layerIdx;
+    }
+  }
+
+  _applyLayerBoxMode() {
+    for (const box of this.layerBoxes) {
+      if (this.layerBoxMode === 'always') {
+        box.visible = true;
+      } else if (this.layerBoxMode === 'hover') {
+        box.visible = box.userData.layerIdx === this._highlightedLayer;
+      } else {
+        box.visible = false;
+      }
+    }
+  }
+
+  _clearLayerBoxes() {
+    for (const box of this.layerBoxes) {
+      this.scene.remove(box);
+      box.traverse(child => {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) child.material.dispose();
+      });
+    }
+    this.layerBoxes = [];
+  }
+
   /**
    * Update only the colors (for when user changes color mode).
    */
@@ -434,6 +554,7 @@ export class ModelRenderer {
       this.connectionLines.geometry.dispose();
       this.connectionLines.material.dispose();
     }
+    this._clearLayerBoxes();
     this.renderer.dispose();
     this.controls.dispose();
   }

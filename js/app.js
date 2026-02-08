@@ -4,7 +4,7 @@
  */
 
 import { parseGGUFHeader, extractArchInfo, computeTotalParams, GGMLTypeName } from './gguf-parser.js';
-import { generatePointCloud, generateConnections } from './point-cloud.js';
+import { generatePointCloud, generateConnections, computeLayerBounds } from './point-cloud.js';
 import { ModelRenderer } from './renderer.js';
 
 // ─── DOM Elements ───────────────────────────────────────────────────
@@ -37,6 +37,7 @@ const connectionsToggle = document.getElementById('connections-toggle');
 const connDensityRow = document.getElementById('conn-density-row');
 const connDensitySlider = document.getElementById('conn-density-slider');
 const connDensityDisplay = document.getElementById('conn-density-display');
+const layerBoxMode = document.getElementById('layer-box-mode');
 const legend = document.getElementById('legend');
 const legendWeight = document.getElementById('legend-weight');
 const legendTensor = document.getElementById('legend-tensor');
@@ -237,6 +238,9 @@ async function regeneratePointCloud() {
       rebuildConnections();
     }
 
+    // Generate layer bounding boxes
+    rebuildLayerBoxes();
+
     // Update quick stats with actual count
     updateQuickStats(parsedData.archInfo, parsedData.totalParams, actualPointCount);
 
@@ -410,6 +414,19 @@ connDensitySlider.addEventListener('change', () => {
   }, 100);
 });
 
+// ─── Layer bounding boxes ────────────────────────────────────────────
+
+function rebuildLayerBoxes() {
+  if (!lastPointCloudData || !renderer || !parsedData) return;
+  const bounds = computeLayerBounds(lastPointCloudData.tensorRegions);
+  renderer.setLayerBoxes(bounds, parsedData.archInfo.blockCount || 1);
+  renderer.setLayerBoxMode(layerBoxMode.value);
+}
+
+layerBoxMode.addEventListener('change', () => {
+  if (renderer) renderer.setLayerBoxMode(layerBoxMode.value);
+});
+
 // Sidebar toggle
 sidebarToggle.addEventListener('click', () => {
   sidebar.classList.toggle('collapsed');
@@ -432,13 +449,16 @@ canvasContainer.addEventListener('mousemove', (e) => {
       tooltip.style.display = 'block';
       tooltip.style.left = (e.clientX + 14) + 'px';
       tooltip.style.top = (e.clientY + 14) + 'px';
+      tooltip.querySelector('.tt-known').textContent = region.knownName || region.category;
       tooltip.querySelector('.tt-name').textContent = region.name;
-      const dims = region.dims.join(' x ');
+      const dims = region.dims.join(' × ');
       const typeName = GGMLTypeName[region.type] || '?';
-      const layer = region.layerIdx >= 0 ? `Layer ${region.layerIdx}` : 'Global';
-      tooltip.querySelector('.tt-detail').textContent = `${layer} | ${dims} | ${typeName}`;
+      tooltip.querySelector('.tt-detail').textContent = `${dims} | ${typeName}`;
+      // Highlight layer box on hover
+      if (renderer) renderer.highlightLayer(region.layerIdx);
     } else {
       tooltip.style.display = 'none';
+      if (renderer) renderer.highlightLayer(-1);
     }
   }, 50);
 });

@@ -416,13 +416,21 @@ select {
   box-shadow: 0 4px 16px rgba(0,0,0,0.4);
 }
 
-#tooltip .tt-name {
+#tooltip .tt-known {
   font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 3px;
+}
+
+#tooltip .tt-name {
+  font-size: 11px;
+  color: var(--text-secondary);
+  word-break: break-all;
   margin-bottom: 2px;
 }
 
 #tooltip .tt-detail {
-  color: var(--text-secondary);
+  color: var(--text-muted);
   font-size: 11px;
 }
 
@@ -623,6 +631,14 @@ select {
         <input type="range" id="conn-density-slider" min="0.1" max="3.0" step="0.1" value="1.0">
         <span class="value-display" id="conn-density-display">1.0</span>
       </div>
+      <div class="control-row">
+        <label>Layer Boxes</label>
+        <select id="layer-box-mode">
+          <option value="disabled" selected>Disabled</option>
+          <option value="hover">On Hover</option>
+          <option value="always">Always</option>
+        </select>
+      </div>
     </div>
 
     <div class="sidebar-section" id="legend">
@@ -640,6 +656,9 @@ select {
           <div class="legend-item"><div class="legend-swatch" style="background:#ff8844;"></div>FFN Gate</div>
           <div class="legend-item"><div class="legend-swatch" style="background:#ffaa44;"></div>FFN Up</div>
           <div class="legend-item"><div class="legend-swatch" style="background:#ff6644;"></div>FFN Down</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:#00e5d9;"></div>MoE Router</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:#d940f2;"></div>MoE Expert Up</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:#f2bf1a;"></div>MoE Expert Down</div>
           <div class="legend-item"><div class="legend-swatch" style="background:#44dd88;"></div>Embedding</div>
           <div class="legend-item"><div class="legend-swatch" style="background:#dddd44;"></div>Norm</div>
           <div class="legend-item"><div class="legend-swatch" style="background:#aa66ff;"></div>Output</div>
@@ -682,6 +701,7 @@ select {
 
 <!-- Tooltip -->
 <div id="tooltip">
+  <div class="tt-known"></div>
   <div class="tt-name"></div>
   <div class="tt-detail"></div>
 </div>
