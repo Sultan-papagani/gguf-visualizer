@@ -2,6 +2,8 @@
 
 A browser-based tool that renders `.gguf` language model files as interactive 3D point clouds. Instead of reading a model's name to understand it, you can **see** its architecture — dense vs MoE, attention head count, layer depth, FFN size, and more — all encoded into a spatial structure you can fly through.
 
+try it here: https://sultan-papagani.github.io/gguf-visualizer/
+
 ![No dependencies to install. Just open and drop a file.](https://img.shields.io/badge/zero--install-just_open_index.html-6c8aff)
 
 ## What it does
@@ -105,4 +107,5 @@ three@0.163.0 — https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.
 ## License
 
 Do whatever you want with it.
+
 
